@@ -185,6 +185,9 @@ def _process_splice(original_path: str, output_path: str, ad_segments: list[dict
 # Each ad segment is expanded by this many ms on both sides before cutting.
 _AD_PAD_MS = 200
 
+# Adjacent ads separated by less than this ms of content are merged into one.
+_AD_BRIDGE_MS = 30_000
+
 # Content windows shorter than this at the very start or end of the podcast
 # are absorbed into the adjacent ad rather than kept as a tiny isolated clip.
 _EDGE_ABSORB_MS = 2000
@@ -194,25 +197,35 @@ def _build_keep_ranges(ad_segments: list[dict], duration_ms: int) -> list[tuple[
     if not ad_segments:
         return [(0, duration_ms)]
 
-    sorted_ads = sorted(ad_segments, key=lambda s: int(s.get("start_ms", 0)))
-    keep = []
-    cursor = 0
-
-    for ad in sorted_ads:
+    # Step 1: sort and apply symmetric padding.
+    padded = []
+    for ad in sorted(ad_segments, key=lambda s: int(s.get("start_ms", 0))):
         start = max(0, int(ad.get("start_ms", 0)) - _AD_PAD_MS)
         end = min(duration_ms, int(ad.get("end_ms", 0)) + _AD_PAD_MS)
+        padded.append([start, end])
+
+    # Step 2: merge overlapping ads and bridge short gaps between adjacent ads.
+    merged = [padded[0]]
+    for start, end in padded[1:]:
+        gap = start - merged[-1][1]
+        if gap <= 0 or gap < _AD_BRIDGE_MS:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+
+    # Step 3: build keep ranges from the merged ad list.
+    keep = []
+    cursor = 0
+    for start, end in merged:
         if cursor < start:
             keep.append((cursor, start))
         cursor = max(cursor, end)
-
     if cursor < duration_ms:
         keep.append((cursor, duration_ms))
 
-    # Absorb short leading content into the first ad.
+    # Step 4: absorb short leading/trailing content windows.
     if keep and (keep[0][1] - keep[0][0]) <= _EDGE_ABSORB_MS:
         keep.pop(0)
-
-    # Absorb short trailing content into the last ad.
     if keep and (keep[-1][1] - keep[-1][0]) <= _EDGE_ABSORB_MS:
         keep.pop()
 
